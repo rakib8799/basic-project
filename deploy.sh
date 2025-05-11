@@ -24,7 +24,7 @@ fi
 
 echo "📥 Pulling latest changes from Git..."
 git reset --hard
-git pull origin development
+git pull origin main
 
 # Ensure the app is up-to-date with PHP dependencies
 echo "📦 Installing PHP dependencies..."
