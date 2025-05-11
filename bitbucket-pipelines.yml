@@ -1,0 +1,20 @@
+image: mkrakib/laravel-php:8.3
+
+pipelines:
+  default:
+    - step:
+        name: "Build & Deploy Laravel"
+        caches:
+          - composer
+          - node
+        script:
+          - composer install --no-interaction --prefer-dist --no-dev --optimize-autoloader
+          - npm ci
+          - npm run build
+
+          # Add known host (optional if you trust server)
+          - mkdir -p ~/.ssh
+          - ssh-keyscan -H "155.133.23.233" >> ~/.ssh/known_hosts
+
+          # SSH into server and run deploy
+          - ssh -o StrictHostKeyChecking=no root@155.133.23.233 'bash -s' < ./deploy.sh
