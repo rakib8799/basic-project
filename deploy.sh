@@ -1,71 +1,123 @@
 #!/bin/bash
 
-echo "🚀 Starting Laravel, Inertia & Vue.js deployment..."
+set -e
+set -o pipefail
 
-# Configurations
+# Log deployment output to a file
+exec > >(tee -a deploy.log)
+exec 2>&1
+
+echo "🚀 Starting full Laravel + Inertia + Vue.js deployment..."
+
+# === CONFIGURATION ===
 USER="admin"
 SUB_DOMAIN="basic-project"
 DOMAIN="mkrdev.xyz"
-
 APP_DIR="/home/$USER/web/$SUB_DOMAIN.$DOMAIN/public_html"
-PHP="php8.3"   # Ensure this matches your PHP version
+PHP="php8.3"
 
-# Navigate to app directory
-cd "$APP_DIR" || {
-    echo "❌ Failed to access $APP_DIR"
-    exit 1
-}
+# === STEP 1: Check Private repository and set ssh key for this  ===
+if [ "$IS_PRIVATE_REPO" = "true" ] && [ -n "$SSH_KEY" ]; then
+    echo "🔐 Setting up SSH agent for private GitHub repository access..."
+    eval "$(ssh-agent -s)"
 
-# Check if .git exists
-if [ ! -d ".git" ]; then
-    echo "❌ No Git repository found in $APP_DIR"
-    exit 1
+    SSH_KEY="${SSH_KEY/#\~/$HOME}"
+    echo "Using SSH key: $SSH_KEY"
+
+    ssh-add "$SSH_KEY"
+else
+    echo "ℹ️ Skipping SSH setup — either the repo is Public or SSH KEY is missing."
 fi
 
-echo "📥 Pulling latest changes from Git..."
-git reset --hard
-git pull origin main
+# === STEP 2: Navigate to App Directory ===
+echo "📂 Changing to app directory..."
+cd "$APP_DIR" || { echo "❌ Failed to access $APP_DIR"; exit 1; }
 
-# Ensure the app is up-to-date with PHP dependencies
-echo "📦 Installing PHP dependencies..."
-composer install --no-interaction --prefer-dist --optimize-autoloader
+# === STEP 3: Git Pull with Safety ===
+echo "📥 Pulling latest code..."
+if [ ! -d ".git" ]; then
+    echo "❌ No Git repository found."
+    exit 1
+fi
+git config --global --add safe.directory "$APP_DIR"
+git fetch origin main
+git reset --hard origin/main
 
-# Laravel specific configurations (environment file, key generation, etc.)
-echo "🔐 Setting up Laravel application..."
+# === STEP 4: .env and APP_KEY ===
+echo "🔐 Checking environment file..."
 if [ ! -f ".env" ]; then
+    echo "📄 .env not found. Copying from .env.example..."
     cp .env.example .env
 fi
 
-# Set the correct permissions for Laravel storage and cache
-chmod -R ug+rwx storage bootstrap/cache
-chown -R www-data:www-data storage bootstrap/cache
+# === STEP 5: Composer Dependencies ===
+echo "📦 Installing Composer dependencies..."
+composer clear-cache
+composer install --no-interaction --prefer-dist --optimize-autoloader --no-dev
 
-touch storage/logs/laravel.log
-chmod 666 storage/logs/laravel.log
-chown www-data:www-data storage/logs/laravel.log
+echo "🔑 Checking APP_KEY..."
+if ! grep -q "^APP_KEY=base64" .env; then
+    echo "🔑 Generating APP_KEY..."
+    $PHP artisan key:generate
+fi
 
-echo "🔑 Generating application key if not set..."
-$PHP artisan key:generate --force
+# === STEP 6: Backup .env & Database ===
+echo "💾 Backing up .env and database..."
+cp .env ".env.backup.$(date +%F-%H-%M-%S)"
 
-echo "🧪 Running migrations and setting up caches..."
+# Ensure correct permissions before backup
+sudo chown -R "$USER":"$USER" "$APP_DIR/storage"
+sudo chmod -R 775 "$APP_DIR/storage"
+
+# Run the backup
+sudo -u "$USER" $PHP artisan backup:run --only-db --disable-notifications || echo "⚠️ Database backup skipped or failed"
+
+# === STEP 7: Database Migrations ===
+echo "🧬 Running migrations..."
 $PHP artisan migrate --force
-$PHP artisan config:cache
-$PHP artisan route:cache
-$PHP artisan view:cache
 
-# Install and build Node.js (Vue.js) dependencies
-echo "🧱 Installing Node dependencies and building assets..."
-npm ci || npm install
+# === STEP 8: NPM Build ===
+echo "🧱 Building frontend assets..."
+npm ci
 npm run build
 
-# Optional: Clear and cache all assets to ensure it's up-to-date
-npm run prod
+# === STEP 9: Permissions ===
+echo "🔐 Setting correct permissions..."
+sudo chown -R "$USER":"$USER" "$APP_DIR/storage"
+sudo chmod -R 775 "$APP_DIR/storage"
+sudo chmod -R 775 "$APP_DIR/bootstrap/cache"
+chmod -R 775 "$APP_DIR"
 
-echo "✅ Deployment complete!"
+# === STEP 10: Queue and Scheduling ===
+echo "🔄 Checking if Queue commands exist..."
+if command -v $PHP artisan queue:restart > /dev/null 2>&1; then
+    echo "🔄 Restarting queues if running..."
+    $PHP artisan queue:restart  # Restart queues if running
+else
+    echo "⚠️ queue:restart command not found. Skipping queue restart."
+fi
 
-# Restart services if required (e.g., Nginx or PHP-FPM)
-echo "🔄 Restarting PHP-FPM and Nginx..."
-systemctl restart php8.3-fpm
-systemctl restart nginx
+echo "⏰ Checking if Scheduled tasks exist..."
+if command -v $PHP artisan schedule:run > /dev/null 2>&1; then
+    echo "⏰ Running scheduled tasks..."
+    $PHP artisan schedule:run   # Run any scheduled tasks immediately
+else
+    echo "⚠️ schedule:run command not found. Skipping scheduled tasks."
+fi
 
-echo "🚀 Site deployed and services restarted successfully!"
+# === STEP 11: Storage Link ===
+echo "🔗 Checking if storage:link command exists..."
+if command -v $PHP artisan storage:link > /dev/null 2>&1; then
+    echo "🔗 Creating storage symlink..."
+    $PHP artisan storage:link  # Create symlink for storage if needed
+else
+    echo "⚠️ storage:link command not found. Skipping storage symlink."
+fi
+
+# === STEP 12: Restart Services (PHP-FPM, Nginx) ===
+echo "🔄 Restarting PHP-FPM and Nginx services..."
+sudo systemctl restart php8.3-fpm
+sudo systemctl restart nginx
+
+# === COMPLETE ===
+echo "✅ Deployment completed successfully!"

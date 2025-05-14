@@ -2,7 +2,7 @@ name: Laravel CI/CD
 
 on:
   push:
-    branches: [main]  # or 'development'
+    branches: [main]
 
 jobs:
   build:
@@ -19,25 +19,27 @@ jobs:
         extensions: mbstring, pdo, pdo_mysql, gd, zip
         tools: composer
 
-    - name: Install Composer dependencies
-      run: composer install --no-interaction --prefer-dist --no-dev --optimize-autoloader
-
     - name: Set up Node
       uses: actions/setup-node@v3
       with:
-        node-version: '18'
+        node-version: '22'
 
-    - name: Install Node dependencies and build assets
-      run: |
-        npm ci
-        npm run build
-
-    - name: Add SSH key
+    - name: Add SSH key (if exists)
       run: |
         mkdir -p ~/.ssh
-        echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
-        chmod 600 ~/.ssh/id_ed25519
-        ssh-keyscan -H 155.133.23.233 >> ~/.ssh/known_hosts
+        if [ -n "${{ secrets.DEPLOY_SSH_KEY }}" ]; then
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H github.com >> ~/.ssh/known_hosts
+        fi
 
     - name: Deploy via SSH
-      run: ssh -o StrictHostKeyChecking=no root@155.133.23.233 'bash -s' < ./deploy.sh
+      run: |
+        # Get SSH key path
+        SSH_KEY="~/.ssh/id_ed25519"
+
+        # Check if repo is private (returns true/false)
+        IS_PRIVATE_REPO="${{ github.event.repository.private }}"
+
+        ssh -o StrictHostKeyChecking=no root@155.133.23.233 \
+          "export IS_PRIVATE_REPO='$IS_PRIVATE_REPO'; export SSH_KEY='$SSH_KEY'; bash -s" < ./deploy.sh
